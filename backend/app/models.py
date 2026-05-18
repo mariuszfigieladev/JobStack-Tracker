@@ -17,7 +17,7 @@ class JobOffer(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     title: str = Field(index=True)
-    url: str = Field(unique=True)  # Prevents scraping the exact same offer twice
+    url: str = Field(unique=True)
     raw_content: str = Field(description="Full raw text scraped from the job posting")
     
     salary_min: Optional[int] = Field(default=None)
@@ -25,6 +25,7 @@ class JobOffer(SQLModel, table=True):
     currency: Optional[str] = Field(default="PLN")
     
     applied_at: datetime = Field(default_factory=datetime.utcnow)
-    notes: Optional[str] = Field(default=None, description="Personal notes about the application process")
+    notes: Optional[str] = Field(default=None)
 
     company_id: int = Field(foreign_key="companies.id")
+    company: Company = Relationship(back_populates="offers")

@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   db:
     image: postgres:16-alpine
@@ -38,6 +36,15 @@ services:
     depends_on:
       db:
         condition: service_healthy
+  
+  scraper:
+    build: ./scraper
+    container_name: jobstack_scraper
+    restart: always
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./scraper:/code
 
 volumes:
   postgres_data:
