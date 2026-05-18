@@ -1,22 +1,43 @@
 from sqlmodel import Session, select
-from app.models import Company, JobOffer
+from app.models import Company, JobOffer, TechTag, JobOfferTagLink
 
-def create_job_offer_with_company(session: Session, offer_data: dict, company_name: str) -> JobOffer:
-    # 1. Check if the company already exists
-    statement = select(Company).where(Company.name == company_name)
-    company = session.exec(statement).first()
-
-    # 2. If it doesn't exist, create a new one
+def create_job_offer_with_company(session: Session, offer_dict: dict, company_name: str) -> JobOffer:
+    requirements = offer_dict.pop("requirements", [])
+    print(f"DEBUG BACKEND: Otrzymane wymagania z LLM -> {requirements}", flush=True)
+    
+    company = session.exec(select(Company).where(Company.name == company_name)).first()
     if not company:
         company = Company(name=company_name)
         session.add(company)
         session.commit()
         session.refresh(company)
-
-    # 3. Create the job offer and link it to the company
-    db_offer = JobOffer(**offer_data, company_id=company.id)
-    session.add(db_offer)
+        
+    offer = JobOffer(**offer_dict, company_id=company.id)
+    session.add(offer)
     session.commit()
-    session.refresh(db_offer)
+    session.refresh(offer)
     
-    return db_offer
+    for req in requirements:
+        req_clean = req.strip().lower()
+        
+        tag = session.exec(select(TechTag).where(TechTag.name == req_clean)).first()
+        if not tag:
+            tag = TechTag(name=req_clean)
+            session.add(tag)
+            session.commit()
+            session.refresh(tag)
+            
+        link_exists = session.exec(
+            select(JobOfferTagLink).where(
+                JobOfferTagLink.job_offer_id == offer.id,
+                JobOfferTagLink.tech_tag_id == tag.id
+            )
+        ).first()
+        
+        if not link_exists:
+            link = JobOfferTagLink(job_offer_id=offer.id, tech_tag_id=tag.id)
+            session.add(link)
+        
+    session.commit()
+    session.refresh(offer)
+    return offer
