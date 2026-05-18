@@ -1,98 +1,76 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
-from sqlalchemy.orm import joinedload
-from typing import Optional, List
 from pydantic import BaseModel
-from datetime import datetime
 import requests
+
 from app.database import get_session
-from app.crud.offer import create_job_offer_with_company
-from app.models import JobOffer
+from app.models import Company, JobOffer, TechTag, JobOfferTagLink
 
-router = APIRouter(prefix="/offers", tags=["Job Offers"])
+router = APIRouter(prefix="/offers", tags=["Offers"])
 
-class TagRead(BaseModel):
-    id: int
-    name: str
+SCRAPER_SERVICE_URL = "http://scraper:8001/scrape"
 
-    class Config:
-        from_attributes = True
-
-class CompanyRead(BaseModel):
-    id: int
-    name: str
-    website: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
-class JobOfferRead(BaseModel):
-    id: int
-    title: str
-    url: str
-    salary_min: Optional[int] = None
-    salary_max: Optional[int] = None
-    currency: str
-    applied_at: datetime
-    notes: Optional[str] = None
-    company: CompanyRead
-    tags: List[TagRead]
-
-    class Config:
-        from_attributes = True
-
-class JobOfferCreate(BaseModel):
-    company_name: str
-    title: str
-    url: str
-    raw_content: str
-    salary_min: Optional[int] = None
-    salary_max: Optional[int] = None
-    currency: Optional[str] = "PLN"
-    notes: Optional[str] = None
-    requirements: Optional[List[str]] = []
-
+# Wymuszamy, aby Swagger używał ładnego pola JSON do wklejania URL
 class ScrapeRequest(BaseModel):
     url: str
 
-@router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
-def add_manual_offer(offer_input: JobOfferCreate, session: Session = Depends(get_session)):
-    offer_dict = offer_input.model_dump()
-    company_name = offer_dict.pop("company_name")
-    
+@router.post("/scrape")
+def scrape_and_store_offer(request: ScrapeRequest, db: Session = Depends(get_session)):
+    # 1. Pobranie danych ze scrapera (zwiększony timeout do 60 sekund!)
     try:
-        new_offer = create_job_offer_with_company(session, offer_dict, company_name)
-        return {"message": "Job offer saved successfully", "offer_id": new_offer.id}
-    except Exception as e:
-        session.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to save job offer. Error: {str(e)}"
-        )
-
-@router.post("/scrape", response_model=dict, status_code=status.HTTP_201_CREATED)
-def scrape_and_add_offer(request: ScrapeRequest, session: Session = Depends(get_session)):
-    try:
-        scraper_response = requests.post("http://scraper:8001/scrape", json={"url": request.url}, timeout=15)
-        scraper_response.raise_for_status()
-        scraped_data = scraper_response.json()
+        response = requests.post(SCRAPER_SERVICE_URL, json={"url": request.url}, timeout=60.0)
         
-        company_name = scraped_data.pop("company_name")
-        new_offer = create_job_offer_with_company(session, scraped_data, company_name)
-        
-        return {"message": "Job offer scraped and saved", "offer_id": new_offer.id}
-    except requests.RequestException as e:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Scraper service error: {e}")
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Scraper rejected the request. Status: {response.status_code}, Info: {response.text}"
+            )
+            
+        scraped_data = response.json()
+    except requests.exceptions.Timeout:
+        raise HTTPException(status_code=504, detail="Scraper took too long (over 60 seconds). Try again.")
     except Exception as e:
-        session.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Scraper connection error: {str(e)}")
 
-@router.get("/", response_model=List[JobOfferRead])
-def get_all_offers(session: Session = Depends(get_session)):
-    # Używamy joinedload, aby załadować relacje Many-to-One (company) oraz Many-to-Many (tags)
-    statement = select(JobOffer).options(
-        joinedload(JobOffer.company),
-        joinedload(JobOffer.tags)
+    # 2. Pobranie lub stworzenie firmy
+    company_name = scraped_data.get("company_name", "Unknown")
+    company = db.exec(select(Company).where(Company.name == company_name)).first()
+    if not company:
+        company = Company(name=company_name)
+        db.add(company)
+        db.flush()
+
+    # 3. Stworzenie oferty pracy
+    new_offer = JobOffer(
+        title=scraped_data.get("title"),
+        url=scraped_data.get("url"),
+        salary_min=scraped_data.get("salary_min"),
+        salary_max=scraped_data.get("salary_max"),
+        currency=scraped_data.get("currency", "PLN"),
+        raw_content=scraped_data.get("raw_content", ""),
+        company_id=company.id
     )
-    offers = session.exec(statement).unique().all()
-    return offers
+    db.add(new_offer)
+    db.flush()
+
+    # 4. Mapowanie tagów technologicznych (Many-to-Many)
+    requirements = scraped_data.get("requirements", [])
+    for req in requirements:
+        req_clean = req.lower().strip()
+        if not req_clean:
+            continue
+            
+        tag = db.exec(select(TechTag).where(TechTag.name == req_clean)).first()
+        if not tag:
+            tag = TechTag(name=req_clean)
+            db.add(tag)
+            db.flush()
+            
+        link = JobOfferTagLink(job_offer_id=new_offer.id, tech_tag_id=tag.id)
+        db.add(link)
+
+    # 5. Zapisanie transakcji
+    db.commit()
+    db.refresh(new_offer)
+
+    return {"status": "success", "inserted_id": new_offer.id, "data": scraped_data}
