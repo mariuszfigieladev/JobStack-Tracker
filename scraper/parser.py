@@ -1,12 +1,24 @@
-import requests
+import os
 from bs4 import BeautifulSoup
-from typing import Dict, Optional
+import requests
+from typing import Optional, List
+from pydantic import BaseModel, Field
+from google import genai
+from google.genai import types
+
+class ScrapedJobOffer(BaseModel):
+    title: str = Field(description="Exact job title, e.g. Senior AI Engineer")
+    company_name: str = Field(description="Cleaned company name, e.g. Alten")
+    salary_min: Optional[int] = Field(None, description="Minimum salary, null if not specified")
+    salary_max: Optional[int] = Field(None, description="Maximum salary, null if not specified")
+    currency: Optional[str] = Field("PLN", description="Currency code, e.g. PLN, EUR, USD")
+    requirements: List[str] = Field(description="List of key technologies and requirements found in text, e.g. ['Python', 'FastAPI', 'Docker']")
 
 class JobScraper:
     def __init__(self):
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
-        }
+        self.headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+        api_key = os.getenv("GEMINI_API_KEY")
+        self.ai_client = genai.Client(api_key=api_key) if api_key else None
 
     def fetch_html(self, url: str) -> Optional[str]:
         try:
@@ -20,33 +32,51 @@ class JobScraper:
         for element in soup(["script", "style", "nav", "footer", "header"]):
             element.decompose()
         text = soup.get_text(separator="\n")
-        lines = [line.strip() for line in text.splitlines()]
-        return "\n".join([line for line in lines if line])
+        return "\n".join([line.strip() for line in text.splitlines() if line.strip()])
 
-    def scrape_offer(self, url: str) -> Optional[Dict]:
-        if "linkedin.com" in url:
-            pass
+    def analyze_with_llm(self, raw_text: str) -> Optional[ScrapedJobOffer]:
+        if not self.ai_client:
+            return None
+        
+        prompt = f"Analyze the following raw text from a job posting and extract structural data:\n\n{raw_text}"
+        
+        try:
+            response = self.ai_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ScrapedJobOffer,
+                    temperature=0.1
+                ),
+            )
+            return ScrapedJobOffer.model_validate_json(response.text)
+        except Exception as e:
+            print(f"LLM extraction error: {e}")
+            return None
 
+    def scrape_offer(self, url: str) -> Optional[dict]:
         html_content = self.fetch_html(url)
         if not html_content:
             return None
 
         soup = BeautifulSoup(html_content, "html.parser")
-        
-        title = soup.find("title")
-        title_text = title.get_text().strip() if title else "Unknown Position"
-
-        og_company = soup.find("meta", property="og:site_name")
-        company_name = og_company["content"].strip() if og_company else "Unknown Company"
-
         raw_text = self.clean_and_extract_text(soup)
-
-        return {
-            "title": title_text,
-            "company_name": company_name,
-            "url": url,
-            "raw_content": raw_text,
-            "salary_min": None,
-            "salary_max": None,
-            "currency": "PLN"
-        }
+        
+        llm_data = self.analyze_with_llm(raw_text)
+        
+        if llm_data:
+            result = llm_data.model_dump()
+        else:
+            result = {
+                "title": soup.find("title").get_text().strip() if soup.find("title") else "Unknown",
+                "company_name": "Unknown",
+                "salary_min": None,
+                "salary_max": None,
+                "currency": "PLN",
+                "requirements": []
+            }
+            
+        result["url"] = url
+        result["raw_content"] = raw_text
+        return result
