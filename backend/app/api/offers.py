@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
 from sqlmodel import Session, select, func
-from sqlalchemy.orm.attributes import flag_modified
 from pydantic import BaseModel
 from typing import Optional, List
 import requests
@@ -15,6 +14,7 @@ SCRAPER_SERVICE_URL = "http://scraper:8001/scrape"
 
 class ScrapeRequest(BaseModel):
     url: str
+    raw_content: Optional[str] = None
 
 class OfferUpdateRequest(BaseModel):
     company_name: Optional[str] = None
@@ -23,17 +23,37 @@ class OfferUpdateRequest(BaseModel):
 @router.post("/scrape")
 def scrape_and_store_offer(request: ScrapeRequest, db: Session = Depends(get_session)):
     try:
-        response = requests.post(SCRAPER_SERVICE_URL, json={"url": request.url}, timeout=60.0)
+        payload = {"url": request.url, "raw_content": request.raw_content}
+        response = requests.post(SCRAPER_SERVICE_URL, json=payload, timeout=60.0)
+        
+        # Jeśli scraper rzucił 403 lub 500, nie crashujemy backendu błędem 500.
+        # Budujemy fallback bezpośrednio z danych żądania.
         if response.status_code != 200:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Scraper rejected the request. Status: {response.status_code}"
-            )
-        scraped_data = response.json()
+            scraped_data = {
+                "title": "Cloudflare Protected Offer",
+                "company_name": "Unknown Company",
+                "salary_min": None,
+                "salary_max": None,
+                "currency": "PLN",
+                "requirements": [],
+                "raw_content": f"Failed to fetch content directly (Status {response.status_code}). Please use the Chrome Extension on this page."
+            }
+        else:
+            scraped_data = response.json()
+            
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Scraper connection error: {str(e)}")
+        # Fallback na wypadek całkowitego braku łączności z kontenerem scrapera
+        scraped_data = {
+            "title": "Connection Failure Offer",
+            "company_name": "Unknown Company",
+            "salary_min": None,
+            "salary_max": None,
+            "currency": "PLN",
+            "requirements": [],
+            "raw_content": f"Scraper connection error: {str(e)}. Please use the Chrome Extension."
+        }
 
-    company_name = scraped_data.get("company_name", "Unknown")
+    company_name = scraped_data.get("company_name") or "Unknown"
     company = db.exec(select(Company).where(Company.name == company_name)).first()
     if not company:
         company = Company(name=company_name)
@@ -41,8 +61,8 @@ def scrape_and_store_offer(request: ScrapeRequest, db: Session = Depends(get_ses
         db.flush()
 
     new_offer = JobOffer(
-        title=scraped_data.get("title"),
-        url=scraped_data.get("url"),
+        title=scraped_data.get("title") or "Unknown Title",
+        url=request.url,
         salary_min=scraped_data.get("salary_min"),
         salary_max=scraped_data.get("salary_max"),
         currency=scraped_data.get("currency", "PLN"),
@@ -136,21 +156,17 @@ def update_offer(offer_id: int, request: OfferUpdateRequest, db: Session = Depen
         
     if request.company_name:
         company_name_clean = request.company_name.strip()
-        # Szukamy firmy o takiej nazwie lub tworzymy nową
         company = db.exec(select(Company).where(Company.name == company_name_clean)).first()
         if not company:
             company = Company(name=company_name_clean)
             db.add(company)
             db.flush()
             
-        # Aktualizujemy klucz obcy oraz wymuszamy odświeżenie relacji obiektowej
         offer.company_id = company.id
         offer.company = company
-        flag_modified(offer, "company_id")
         
     if request.title:
         offer.title = request.title.strip()
-        flag_modified(offer, "title")
         
     db.add(offer)
     db.commit()

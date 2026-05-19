@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 from parser import JobScraper
 
 app = FastAPI(title="Scraper API")
@@ -8,6 +8,7 @@ scraper = JobScraper()
 
 class ScrapeRequest(BaseModel):
     url: str
+    raw_content: Optional[str] = None
 
 class BriefRequest(BaseModel):
     company_name: str
@@ -17,9 +18,9 @@ class BriefRequest(BaseModel):
 
 @app.post("/scrape")
 def scrape_endpoint(request: ScrapeRequest):
-    result = scraper.scrape_offer(request.url)
+    result = scraper.scrape_offer(request.url, request.raw_content)
     if not result:
-        raise HTTPException(status_code=500, detail="Failed to scrape URL")
+        raise HTTPException(status_code=500, detail="Failed to scrape or parse URL content")
     return result
 
 @app.post("/generate-brief")
