@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
 from sqlmodel import Session, select, func
 from pydantic import BaseModel
+from typing import Optional, List
+from datetime import datetime
 import requests
 
 from app.database import get_session
@@ -13,6 +15,10 @@ SCRAPER_SERVICE_URL = "http://scraper:8001/scrape"
 
 class ScrapeRequest(BaseModel):
     url: str
+
+class OfferUpdateRequest(BaseModel):
+    company_name: Optional[str] = None
+    title: Optional[str] = None
 
 @router.post("/scrape")
 def scrape_and_store_offer(request: ScrapeRequest, db: Session = Depends(get_session)):
@@ -65,6 +71,48 @@ def scrape_and_store_offer(request: ScrapeRequest, db: Session = Depends(get_ses
     db.refresh(new_offer)
     return {"status": "success", "inserted_id": new_offer.id}
 
+@router.get("", response_model=List[dict])
+def get_offers(skip: int = 0, limit: int = 50, db: Session = Depends(get_session)):
+    statement = select(JobOffer).order_by(JobOffer.application_date.desc()).offset(skip).limit(limit)
+    offers = db.exec(statement).all()
+    
+    result = []
+    for offer in offers:
+        company_name = offer.company.name if offer.company else "Unknown"
+        result.append({
+            "id": offer.id,
+            "title": offer.title,
+            "url": offer.url,
+            "company_name": company_name,
+            "application_date": offer.application_date,
+            "tech_tag_ids": [tag.id for tag in offer.tags],
+            "tech_tags": [tag.name for tag in offer.tags],
+            "raw_content": offer.raw_content
+        })
+    return result
+
+@router.patch("/{offer_id}")
+def update_offer(offer_id: int, request: OfferUpdateRequest, db: Session = Depends(get_session)):
+    offer = db.get(JobOffer, offer_id)
+    if not offer:
+        raise HTTPException(status_code=404, detail="Job offer not found")
+        
+    if request.company_name:
+        company = db.exec(select(Company).where(Company.name == request.company_name)).first()
+        if not company:
+            company = Company(name=request.company_name)
+            db.add(company)
+            db.flush()
+        offer.company_id = company.id
+        
+    if request.title:
+        offer.title = request.title
+        
+    db.add(offer)
+    db.commit()
+    db.refresh(offer)
+    return {"status": "updated", "offer_id": offer.id, "new_company": request.company_name}
+
 @router.get("/analytics/top-tags")
 def get_top_tech_tags(limit: int = 10, db: Session = Depends(get_session)):
     statement = (
@@ -92,6 +140,7 @@ def get_offer_for_notebooklm(offer_id: int, db: Session = Depends(get_session)):
 
 ## METADATA
 - **URL:** {offer.url}
+- **Application Date:** {offer.application_date.strftime("%Y-%m-%d %H:%M")}
 - **Salary Minimum:** {offer.salary_min if offer.salary_min else "Not specified"}
 - **Salary Maximum:** {offer.salary_max if offer.salary_max else "Not specified"}
 - **Currency:** {offer.currency}
