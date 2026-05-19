@@ -1,67 +1,100 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 
-interface ScrapeResponse {
-  status: string;
-  inserted_id: number;
+interface Offer {
+  id: number;
+  title: string;
+  company_name: string;
+  application_date: string;
+  tech_tags: string[];
+  raw_content: string;
 }
 
 export default function App() {
+  const [offers, setOffers] = useState<Offer[]>([]);
   const [url, setUrl] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
-  const [brief, setBrief] = useState<string>('');
-  const [error, setError] = useState<string>('');
-  const [copied, setCopied] = useState<boolean>(false);
+  const [showTable, setShowTable] = useState<boolean>(false);
+  const [searchTerm, setSearchTerm] = useState<string>('');
+  const [selectedOffer, setSelectedOffer] = useState<Offer | null>(null);
+  const [downloading, setDownloading] = useState<boolean>(false);
 
-  const handleScrape = async (e: React.FormEvent) => {
+  const fetchOffers = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/offers');
+      if (res.ok) {
+        const data = await res.json();
+        setOffers(data);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  useEffect(() => {
+    fetchOffers();
+  }, []);
+
+  const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    setError('');
-    setBrief('');
-    setCopied(false);
-
     try {
-      const scrapeRes = await fetch('http://localhost:8000/offers/scrape', {
+      const res = await fetch('http://localhost:8000/offers/scrape', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
       });
-
-      if (!scrapeRes.ok) {
-        throw new Error('Scraping pipeline failed');
+      if (res.ok) {
+        setUrl('');
+        await fetchOffers();
       }
-      
-      const scrapeData: ScrapeResponse = await scrapeRes.json();
-
-      const briefRes = await fetch(`http://localhost:8000/offers/${scrapeData.inserted_id}/notebooklm`);
-      if (!briefRes.ok) {
-        throw new Error('Failed to fetch NotebookLM document template');
-      }
-      
-      const briefText = await briefRes.text();
-      setBrief(briefText);
-    } catch (err: any) {
-      setError(err.message || 'An unexpected error occurred');
+    } catch (err) {
+      console.error(err);
     } finally {
       setLoading(false);
     }
   };
 
-  const copyToClipboard = () => {
-    navigator.clipboard.writeText(brief);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const downloadNotebookLMTxt = async (offerId: number, company: string, title: string) => {
+    setDownloading(true);
+    try {
+      const res = await fetch(`http://localhost:8000/offers/${offerId}/notebooklm`);
+      if (!res.ok) throw new Error('Failed to fetch template');
+      
+      const text = await res.text();
+      
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      const downloadUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      
+      const cleanCompanyName = company.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+      link.href = downloadUrl;
+      link.download = `notebooklm_${cleanCompanyName}_${offerId}.txt`;
+      
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(downloadUrl);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setDownloading(false);
+    }
   };
 
+  const filteredOffers = offers.filter((offer) =>
+    offer.company_name.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
   return (
-    <div style={{ maxWidth: '800px', margin: '40px auto', padding: '0 20px', fontFamily: 'system-ui, sans-serif' }}>
-      <h1 style={{ fontSize: '28px', marginBottom: '20px' }}>JobStack to NotebookLM Source Generator</h1>
+    <div style={{ maxWidth: '1000px', margin: '40px auto', padding: '0 20px', fontFamily: 'system-ui, sans-serif' }}>
+      <h1 style={{ fontSize: '28px', marginBottom: '20px' }}>JobStack Tracker</h1>
       
-      <form onSubmit={handleScrape} style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
+      <form onSubmit={handleAdd} style={{ display: 'flex', gap: '10px', marginBottom: '30px' }}>
         <input
           type="url"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          placeholder="Paste job board URL (e.g. Pracuj.pl, JustJoin)..."
+          placeholder="Paste job board URL to apply..."
           required
           style={{ flex: 1, padding: '12px', fontSize: '16px', borderRadius: '6px', border: '1px solid #ccc' }}
         />
@@ -70,30 +103,88 @@ export default function App() {
           disabled={loading} 
           style={{ padding: '12px 24px', fontSize: '16px', borderRadius: '6px', border: 'none', backgroundColor: '#0070f3', color: '#fff', cursor: 'pointer', fontWeight: 'bold' }}
         >
-          {loading ? 'Processing...' : 'Fetch & Generate'}
+          {loading ? 'Processing...' : 'Add Application'}
         </button>
       </form>
 
-      {error && (
-        <div style={{ padding: '12px', backgroundColor: '#fee2e2', color: '#991b1b', borderRadius: '6px', marginBottom: '20px' }}>
-          {error}
+      <div style={{ marginBottom: '20px' }}>
+        <button
+          onClick={() => setShowTable(!showTable)}
+          style={{ padding: '10px 20px', fontSize: '15px', borderRadius: '6px', border: '1px solid #0070f3', backgroundColor: showTable ? '#e0f2fe' : '#fff', color: '#0070f3', cursor: 'pointer', fontWeight: '500' }}
+        >
+          {showTable ? 'Hide Applications' : 'Show Applications'}
+        </button>
+      </div>
+
+      {showTable && (
+        <div style={{ marginBottom: '40px' }}>
+          <input
+            type="text"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            placeholder="Search by company name..."
+            style={{ width: '100%', padding: '10px', fontSize: '15px', borderRadius: '6px', border: '1px solid #ccc', marginBottom: '15px', boxSizing: 'border-box' }}
+          />
+
+          <table style={{ width: '100%', borderCollapse: 'collapse', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', borderRadius: '6px', overflow: 'hidden' }}>
+            <thead>
+              <tr style={{ backgroundColor: '#f8fafc', borderBottom: '2px solid #e2e8f0' }}>
+                <th style={{ textAlign: 'left', padding: '12px' }}>Company</th>
+                <th style={{ textAlign: 'left', padding: '12px' }}>Title</th>
+                <th style={{ textAlign: 'left', padding: '12px' }}>Date</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredOffers.map((o) => (
+                <tr 
+                  key={o.id} 
+                  onClick={() => setSelectedOffer(o)}
+                  style={{ borderBottom: '1px solid #e2e8f0', cursor: 'pointer', backgroundColor: selectedOffer?.id === o.id ? '#f1f5f9' : '#fff' }}
+                >
+                  <td style={{ padding: '12px', fontWeight: '500' }}>{o.company_name}</td>
+                  <td style={{ padding: '12px', color: '#334155' }}>{o.title}</td>
+                  <td style={{ padding: '12px', color: '#64748b' }}>{new Date(o.application_date).toLocaleDateString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
-      {brief && (
-        <div style={{ marginTop: '30px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-            <h2 style={{ fontSize: '20px', margin: 0 }}>Generated Brief Document</h2>
-            <button 
-              onClick={copyToClipboard} 
-              style={{ padding: '8px 16px', fontSize: '14px', borderRadius: '4px', border: '1px solid #0070f3', backgroundColor: copied ? '#e0f2fe' : '#fff', color: '#0070f3', cursor: 'pointer', fontWeight: '500' }}
+      {selectedOffer && (
+        <div style={{ padding: '25px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '15px' }}>
+            <h2 style={{ margin: 0 }}>{selectedOffer.title} @ {selectedOffer.company_name}</h2>
+            <button
+              onClick={() => downloadNotebookLMTxt(selectedOffer.id, selectedOffer.company_name, selectedOffer.title)}
+              disabled={downloading}
+              style={{ padding: '10px 16px', fontSize: '14px', borderRadius: '6px', border: 'none', backgroundColor: '#10b981', color: '#fff', cursor: 'pointer', fontWeight: 'bold' }}
             >
-              {copied ? 'Copied to Clipboard!' : 'Copy Brief'}
+              {downloading ? 'Downloading...' : 'Generate NotebookLM Template'}
             </button>
           </div>
-          <pre style={{ backgroundColor: '#f8fafc', padding: '20px', overflowX: 'auto', whiteSpace: 'pre-wrap', borderRadius: '8px', border: '1px solid #e2e8f0', fontSize: '14px', lineHeight: '1.5', color: '#334155' }}>
-            {brief}
-          </pre>
+          
+          <div style={{ marginBottom: '20px' }}>
+            <h3 style={{ fontSize: '16px', margin: '0 0 8px 0', color: '#475569' }}>Extracted Skillset</h3>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+              {selectedOffer.tech_tags.length > 0 ? (
+                selectedOffer.tech_tags.map((tag, idx) => (
+                  <span key={idx} style={{ padding: '4px 10px', backgroundColor: '#e2e8f0', color: '#1e293b', borderRadius: '4px', fontSize: '13px', fontWeight: '500' }}>
+                    {tag}
+                  </span>
+                ))
+              ) : (
+                <span style={{ color: '#64748b', fontSize: '14px' }}>No tags found</span>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <h3 style={{ fontSize: '16px', margin: '0 0 8px 0', color: '#475569' }}>Raw Content</h3>
+            <pre style={{ backgroundColor: '#fff', padding: '15px', borderRadius: '6px', border: '1px solid #cbd5e1', overflowX: 'auto', whiteSpace: 'pre-wrap', maxHeight: '300px', fontSize: '13px', lineHeight: '1.6', color: '#334155', margin: 0 }}>
+              {selectedOffer.raw_content}
+            </pre>
+          </div>
         </div>
       )}
     </div>
