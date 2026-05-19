@@ -106,3 +106,36 @@ class JobScraper:
         result["url"] = url
         result["raw_content"] = raw_text if raw_text else "Failed to fetch HTML content"
         return result
+    
+    def generate_notebooklm_brief(self, data: dict) -> str:
+        if not self.ai_client:
+            return "ERROR: Gemini API key is missing."
+        
+        prompt = f"""
+        Act as a Senior IT Recruiter. Analyze this job offer and prepare a structured, highly readable brief.
+        This document will be fed into NotebookLM to generate an educational audio podcast for interview preparation.
+        
+        Company: {data.get('company_name')}
+        Title: {data.get('title')}
+        Tech Stack: {', '.join(data.get('tech_tags', []))}
+        
+        Raw Content:
+        {data.get('raw_content')}
+        
+        Format strictly in Markdown. Include:
+        1. Role Overview (TL;DR of the position)
+        2. Core Responsibilities (Actionable list)
+        3. Tech Stack Deep Dive (Why these tools matter for this role)
+        4. Potential Interview Questions (Generate 5 hard technical/behavioral questions based on the requirements)
+        """
+        
+        try:
+            from google.genai import types
+            response = self.ai_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0.7),
+            )
+            return response.text
+        except Exception as e:
+            return f"CRITICAL LLM ERROR: {str(e)}"

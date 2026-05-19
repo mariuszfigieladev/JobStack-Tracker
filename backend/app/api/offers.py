@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
 from sqlmodel import Session, select, func
+from sqlalchemy.orm.attributes import flag_modified
 from pydantic import BaseModel
 from typing import Optional, List
-from datetime import datetime
 import requests
 
 from app.database import get_session
@@ -71,6 +71,43 @@ def scrape_and_store_offer(request: ScrapeRequest, db: Session = Depends(get_ses
     db.refresh(new_offer)
     return {"status": "success", "inserted_id": new_offer.id}
 
+@router.get("/analytics/top-tags")
+def get_top_tech_tags(limit: int = 10, db: Session = Depends(get_session)):
+    statement = (
+        select(TechTag.name, func.count(JobOfferTagLink.job_offer_id))
+        .join(JobOfferTagLink, TechTag.id == JobOfferTagLink.tech_tag_id)
+        .group_by(TechTag.id)
+        .order_by(func.count(JobOfferTagLink.job_offer_id).desc())
+        .limit(limit)
+    )
+    results = db.exec(statement).all()
+    return [{"tag": row[0], "count": row[1]} for row in results]
+
+@router.get("/{offer_id}/notebooklm", response_class=PlainTextResponse)
+def get_offer_for_notebooklm(offer_id: int, db: Session = Depends(get_session)):
+    offer = db.get(JobOffer, offer_id)
+    if not offer:
+        raise HTTPException(status_code=404, detail="Job offer not found")
+        
+    company_name = offer.company.name if offer.company else "Unknown"
+    tags_list = [tag.name for tag in offer.tags]
+    
+    payload = {
+        "company_name": company_name,
+        "title": offer.title,
+        "tech_tags": tags_list,
+        "raw_content": offer.raw_content
+    }
+    
+    try:
+        response = requests.post("http://scraper:8001/generate-brief", json=payload, timeout=60.0)
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="Scraper LLM generation failed")
+            
+        return response.json().get("brief", "Error extracting brief from response")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("", response_model=List[dict])
 def get_offers(skip: int = 0, limit: int = 50, db: Session = Depends(get_session)):
     statement = select(JobOffer).order_by(JobOffer.application_date.desc()).offset(skip).limit(limit)
@@ -98,59 +135,29 @@ def update_offer(offer_id: int, request: OfferUpdateRequest, db: Session = Depen
         raise HTTPException(status_code=404, detail="Job offer not found")
         
     if request.company_name:
-        company = db.exec(select(Company).where(Company.name == request.company_name)).first()
+        company_name_clean = request.company_name.strip()
+        # Szukamy firmy o takiej nazwie lub tworzymy nową
+        company = db.exec(select(Company).where(Company.name == company_name_clean)).first()
         if not company:
-            company = Company(name=request.company_name)
+            company = Company(name=company_name_clean)
             db.add(company)
             db.flush()
+            
+        # Aktualizujemy klucz obcy oraz wymuszamy odświeżenie relacji obiektowej
         offer.company_id = company.id
+        offer.company = company
+        flag_modified(offer, "company_id")
         
     if request.title:
-        offer.title = request.title
+        offer.title = request.title.strip()
+        flag_modified(offer, "title")
         
     db.add(offer)
     db.commit()
     db.refresh(offer)
-    return {"status": "updated", "offer_id": offer.id, "new_company": request.company_name}
-
-@router.get("/analytics/top-tags")
-def get_top_tech_tags(limit: int = 10, db: Session = Depends(get_session)):
-    statement = (
-        select(TechTag.name, func.count(JobOfferTagLink.job_offer_id))
-        .join(JobOfferTagLink, TechTag.id == JobOfferTagLink.tech_tag_id)
-        .group_by(TechTag.id)
-        .order_by(func.count(JobOfferTagLink.job_offer_id).desc())
-        .limit(limit)
-    )
-    results = db.exec(statement).all()
-    return [{"tag": row[0], "count": row[1]} for row in results]
-
-@router.get("/{offer_id}/notebooklm", response_class=PlainTextResponse)
-def get_offer_for_notebooklm(offer_id: int, db: Session = Depends(get_session)):
-    offer = db.get(JobOffer, offer_id)
-    if not offer:
-        raise HTTPException(status_code=404, detail="Job offer not found")
-        
-    company_name = offer.company.name if offer.company else "Unknown"
-    tags_list = [tag.name for tag in offer.tags]
     
-    markdown_template = f"""# JOB OFFER BRIEF: {offer.title}
-## COMPANY
-{company_name}
-
-## METADATA
-- **URL:** {offer.url}
-- **Application Date:** {offer.application_date.strftime("%Y-%m-%d %H:%M")}
-- **Salary Minimum:** {offer.salary_min if offer.salary_min else "Not specified"}
-- **Salary Maximum:** {offer.salary_max if offer.salary_max else "Not specified"}
-- **Currency:** {offer.currency}
-
-## KEY TECHNOLOGIES & REQUIREMENTS
-{", ".join(tags_list) if tags_list else "None extracted"}
-
----
-
-## FULL RAW CONTENT
-{offer.raw_content}
-"""
-    return markdown_template
+    return {
+        "status": "updated", 
+        "offer_id": offer.id, 
+        "new_company": offer.company.name if offer.company else "Unknown"
+    }

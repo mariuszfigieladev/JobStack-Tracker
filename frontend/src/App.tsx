@@ -17,6 +17,10 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [selectedOffer, setSelectedOffer] = useState<Offer | null>(null);
   const [downloading, setDownloading] = useState<boolean>(false);
+  
+  const [isEditingCompany, setIsEditingCompany] = useState<boolean>(false);
+  const [editCompanyName, setEditCompanyName] = useState<string>('');
+  const [updatingCompany, setUpdatingCompany] = useState<boolean>(false);
 
   const fetchOffers = async () => {
     try {
@@ -24,6 +28,11 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setOffers(data);
+        
+        if (selectedOffer) {
+          const updatedSelected = data.find((o: Offer) => o.id === selectedOffer.id);
+          if (updatedSelected) setSelectedOffer(updatedSelected);
+        }
       }
     } catch (err) {
       console.error(err);
@@ -54,6 +63,26 @@ export default function App() {
     }
   };
 
+  const handleUpdateCompany = async () => {
+    if (!selectedOffer || !editCompanyName.trim()) return;
+    setUpdatingCompany(true);
+    try {
+      const res = await fetch(`http://localhost:8000/offers/${selectedOffer.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ company_name: editCompanyName.trim() }),
+      });
+      if (res.ok) {
+        setIsEditingCompany(false);
+        await fetchOffers();
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setUpdatingCompany(false);
+    }
+  };
+
   const downloadNotebookLMTxt = async (offerId: number, company: string, title: string) => {
     setDownloading(true);
     try {
@@ -61,7 +90,6 @@ export default function App() {
       if (!res.ok) throw new Error('Failed to fetch template');
       
       const text = await res.text();
-      
       const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
       const downloadUrl = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -138,7 +166,10 @@ export default function App() {
               {filteredOffers.map((o) => (
                 <tr 
                   key={o.id} 
-                  onClick={() => setSelectedOffer(o)}
+                  onClick={() => {
+                    setSelectedOffer(o);
+                    setIsEditingCompany(false);
+                  }}
                   style={{ borderBottom: '1px solid #e2e8f0', cursor: 'pointer', backgroundColor: selectedOffer?.id === o.id ? '#f1f5f9' : '#fff' }}
                 >
                   <td style={{ padding: '12px', fontWeight: '500' }}>{o.company_name}</td>
@@ -154,7 +185,38 @@ export default function App() {
       {selectedOffer && (
         <div style={{ padding: '25px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '15px' }}>
-            <h2 style={{ margin: 0 }}>{selectedOffer.title} @ {selectedOffer.company_name}</h2>
+            <div>
+              <h2 style={{ margin: 0 }}>{selectedOffer.title}</h2>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '5px' }}>
+                {isEditingCompany ? (
+                  <>
+                    <input 
+                      type="text" 
+                      value={editCompanyName} 
+                      onChange={(e) => setEditCompanyName(e.target.value)}
+                      style={{ padding: '4px 8px', fontSize: '16px', borderRadius: '4px', border: '1px solid #ccc' }}
+                    />
+                    <button onClick={handleUpdateCompany} disabled={updatingCompany} style={{ padding: '4px 10px', backgroundColor: '#0070f3', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
+                      {updatingCompany ? 'Saving...' : 'Save'}
+                    </button>
+                    <button onClick={() => setIsEditingCompany(false)} style={{ padding: '4px 10px', backgroundColor: '#e2e8f0', color: '#334155', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Cancel</button>
+                  </>
+                ) : (
+                  <>
+                    <span style={{ fontSize: '18px', color: '#475569', fontWeight: '500' }}>@ {selectedOffer.company_name}</span>
+                    <button 
+                      onClick={() => {
+                        setEditCompanyName(selectedOffer.company_name);
+                        setIsEditingCompany(true);
+                      }}
+                      style={{ padding: '2px 8px', fontSize: '12px', backgroundColor: 'transparent', border: '1px solid #cbd5e1', borderRadius: '4px', cursor: 'pointer', color: '#64748b' }}
+                    >
+                      Edit Company Name
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
             <button
               onClick={() => downloadNotebookLMTxt(selectedOffer.id, selectedOffer.company_name, selectedOffer.title)}
               disabled={downloading}
