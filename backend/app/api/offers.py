@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlmodel import Session, select
+from fastapi.responses import PlainTextResponse
+from sqlmodel import Session, select, func
 from pydantic import BaseModel
 import requests
 
@@ -10,29 +11,22 @@ router = APIRouter(prefix="/offers", tags=["Offers"])
 
 SCRAPER_SERVICE_URL = "http://scraper:8001/scrape"
 
-# Wymuszamy, aby Swagger używał ładnego pola JSON do wklejania URL
 class ScrapeRequest(BaseModel):
     url: str
 
 @router.post("/scrape")
 def scrape_and_store_offer(request: ScrapeRequest, db: Session = Depends(get_session)):
-    # 1. Pobranie danych ze scrapera (zwiększony timeout do 60 sekund!)
     try:
         response = requests.post(SCRAPER_SERVICE_URL, json={"url": request.url}, timeout=60.0)
-        
         if response.status_code != 200:
             raise HTTPException(
                 status_code=400, 
-                detail=f"Scraper rejected the request. Status: {response.status_code}, Info: {response.text}"
+                detail=f"Scraper rejected the request. Status: {response.status_code}"
             )
-            
         scraped_data = response.json()
-    except requests.exceptions.Timeout:
-        raise HTTPException(status_code=504, detail="Scraper took too long (over 60 seconds). Try again.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Scraper connection error: {str(e)}")
 
-    # 2. Pobranie lub stworzenie firmy
     company_name = scraped_data.get("company_name", "Unknown")
     company = db.exec(select(Company).where(Company.name == company_name)).first()
     if not company:
@@ -40,7 +34,6 @@ def scrape_and_store_offer(request: ScrapeRequest, db: Session = Depends(get_ses
         db.add(company)
         db.flush()
 
-    # 3. Stworzenie oferty pracy
     new_offer = JobOffer(
         title=scraped_data.get("title"),
         url=scraped_data.get("url"),
@@ -53,7 +46,6 @@ def scrape_and_store_offer(request: ScrapeRequest, db: Session = Depends(get_ses
     db.add(new_offer)
     db.flush()
 
-    # 4. Mapowanie tagów technologicznych (Many-to-Many)
     requirements = scraped_data.get("requirements", [])
     for req in requirements:
         req_clean = req.lower().strip()
@@ -69,8 +61,47 @@ def scrape_and_store_offer(request: ScrapeRequest, db: Session = Depends(get_ses
         link = JobOfferTagLink(job_offer_id=new_offer.id, tech_tag_id=tag.id)
         db.add(link)
 
-    # 5. Zapisanie transakcji
     db.commit()
     db.refresh(new_offer)
+    return {"status": "success", "inserted_id": new_offer.id}
 
-    return {"status": "success", "inserted_id": new_offer.id, "data": scraped_data}
+@router.get("/analytics/top-tags")
+def get_top_tech_tags(limit: int = 10, db: Session = Depends(get_session)):
+    statement = (
+        select(TechTag.name, func.count(JobOfferTagLink.job_offer_id))
+        .join(JobOfferTagLink, TechTag.id == JobOfferTagLink.tech_tag_id)
+        .group_by(TechTag.id)
+        .order_by(func.count(JobOfferTagLink.job_offer_id).desc())
+        .limit(limit)
+    )
+    results = db.exec(statement).all()
+    return [{"tag": row[0], "count": row[1]} for row in results]
+
+@router.get("/{offer_id}/notebooklm", response_class=PlainTextResponse)
+def get_offer_for_notebooklm(offer_id: int, db: Session = Depends(get_session)):
+    offer = db.get(JobOffer, offer_id)
+    if not offer:
+        raise HTTPException(status_code=404, detail="Job offer not found")
+        
+    company_name = offer.company.name if offer.company else "Unknown"
+    tags_list = [tag.name for tag in offer.tags]
+    
+    markdown_template = f"""# JOB OFFER BRIEF: {offer.title}
+## COMPANY
+{company_name}
+
+## METADATA
+- **URL:** {offer.url}
+- **Salary Minimum:** {offer.salary_min if offer.salary_min else "Not specified"}
+- **Salary Maximum:** {offer.salary_max if offer.salary_max else "Not specified"}
+- **Currency:** {offer.currency}
+
+## KEY TECHNOLOGIES & REQUIREMENTS
+{", ".join(tags_list) if tags_list else "None extracted"}
+
+---
+
+## FULL RAW CONTENT
+{offer.raw_content}
+"""
+    return markdown_template
