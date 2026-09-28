@@ -1,5 +1,6 @@
 import os
-from sqlmodel import Session, create_engine
+from sqlmodel import Session, create_engine, SQLModel
+from app.models import Company, JobOffer, TechTag, JobOfferTagLink
 
 POSTGRES_USER = os.getenv("POSTGRES_USER")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
@@ -10,6 +11,9 @@ POSTGRES_DB = os.getenv("POSTGRES_DB")
 SQLALCHEMY_DATABASE_URL = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_SERVER}:{POSTGRES_PORT}/{POSTGRES_DB}"
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL, echo=False)
+
+def create_db_and_tables():
+    SQLModel.metadata.create_all(engine)
 
 def get_session():
     with Session(engine) as session:
